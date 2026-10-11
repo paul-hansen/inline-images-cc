@@ -1,0 +1,5 @@
+{
+  "name": "inline-images",
+  "owner": { "name": "paul", "email": "mail@paul.rs" },
+  "plugins": [{ "name": "inline-images", "source": "./" }]
+}
