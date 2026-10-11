@@ -243,6 +243,12 @@ async function strip(
   )
 }
 
+// A prompt row is drawn under its stored uuid with the last group zeroed
+// (86b73434-8a79-4128-8542-000000000000), so prompts are keyed by the rest.
+function promptKey(uuid: string): string {
+  return `prompt:${uuid.slice(0, 23)}`
+}
+
 async function attachedFor($: EngineInterface, id: string): Promise<ImageRef[]> {
   return (await $.state.get({ ...ATTACHED, id })).value ?? []
 }
@@ -297,7 +303,7 @@ export const register: Register = (on, options) => {
     if (e.message.type !== 'user') return stored
     const own = e.message.content.filter(block => block.type === 'image')
     const jobs: Array<[string, Raw[]]> = []
-    if (own.length > 0 && !e.message.isMeta) jobs.push([e.uuid, imagesIn(own)])
+    if (own.length > 0 && !e.message.isMeta) jobs.push([promptKey(e.uuid), imagesIn(own)])
     for (const block of e.message.content) {
       if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
         const found = imagesIn(block.content)
@@ -341,7 +347,7 @@ export const register: Register = (on, options) => {
   // Attachments above the prompt they came with, as thumbnails.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     if (e.surface !== 'terminal' || e.props.origin.kind === 'task-notification') return next(e)
-    const refs = await attachedFor($, e.requestId)
+    const refs = await attachedFor($, promptKey(e.requestId))
     if (refs.length === 0) return next(e)
     const engine = await next(e)
     const el = $.ui.resolve(e)
