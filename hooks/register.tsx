@@ -344,7 +344,7 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // Attachments above the prompt they came with, as thumbnails.
+  // Attachments under the prompt they came with, as thumbnails.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     if (e.surface !== 'terminal' || e.props.origin.kind === 'task-notification') return next(e)
     const refs = await attachedFor($, promptKey(e.requestId))
@@ -354,8 +354,10 @@ export const register: Register = (on, options) => {
     const { Box } = el
     return (
       <Box flexDirection="column">
-        {await strip($, el, refs, e.requestId, 32, config.thumbRows, 'Attached image')}
         {engine}
+        <Box paddingLeft={2}>
+          {await strip($, el, refs, e.requestId, 32, config.thumbRows, 'Attached image')}
+        </Box>
       </Box>
     )
   })
