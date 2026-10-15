@@ -6,6 +6,9 @@ import type { ImageRef } from '../types'
 const PANE = 'image-viewer'
 const ATTACHED = { plugin: 'inline-images', key: 'attached' } as const
 const viewer = atom({ plugin: 'inline-images', key: 'viewer' } as const, null)
+const PENDING = { plugin: 'inline-images', key: 'pending' } as const
+const pending = atom(PENDING, [] as number[])
+const IMAGE_TOKEN = /\[Image #(\d+)\]/g
 
 type E = Elements['terminal']
 type Mode = 'image' | 'halfblock'
@@ -249,6 +252,126 @@ function promptKey(uuid: string): string {
   return `prompt:${uuid.slice(0, 23)}`
 }
 
+let pastedDir: Promise<string | null> | undefined
+let isPastedDirMissingLogged = false
+const pasted = new Map<string, Promise<ImageRef | null>>()
+const PASTED_NAME = /^(\d+)\.(png|jpe?g|gif|webp)$/i
+
+// Where Claude Code saves this session's pasted images, as N.png:
+// <tmp>/claude-<uid>/<project>/<session id>/images, <project> being the
+// working directory with every other character than [A-Za-z0-9] a dash.
+// Not a documented place, so the project folder is searched for too.
+async function findPastedDir($: EngineInterface): Promise<string | null> {
+  const sid = await $.session.id()
+  const project = (await $.session.cwd()).replace(/[^A-Za-z0-9]/g, '-')
+  const tmp = ((await $.env.get('TMPDIR')) ?? '').replace(/\/+$/, '')
+  const roots = [...new Set([tmp, '/tmp'].filter(root => root !== ''))]
+  const users = async (root: string) =>
+    (await $.fs.list(root).catch(() => [])).filter(d => d.kind === 'dir' && d.name.startsWith('claude-'))
+  for (const root of roots) {
+    for (const user of await users(root)) {
+      const guess = `${root}/${user.name}/${project}/${sid}/images`
+      if (await $.fs.exists(guess)) return guess
+    }
+  }
+  for (const root of roots) {
+    for (const user of await users(root)) {
+      for (const dir of await $.fs.list(`${root}/${user.name}`).catch(() => [])) {
+        const folder = `${root}/${user.name}/${dir.name}/${sid}/images`
+        if (dir.kind === 'dir' && (await $.fs.exists(folder))) return folder
+      }
+    }
+  }
+  return null
+}
+
+function pastedImagesDir($: EngineInterface): Promise<string | null> {
+  pastedDir ??= findPastedDir($).catch(() => null).then(found => {
+    if (found === null) {
+      pastedDir = undefined
+      if (!isPastedDirMissingLogged) {
+        isPastedDirMissingLogged = true
+        $.ui.log('inline-images: found no folder of pasted images for this session', { to: 'debug' })
+      }
+    }
+    return found
+  })
+  return pastedDir
+}
+
+function draftImages(text: string): number[] {
+  return [...new Set(Array.from(text.matchAll(IMAGE_TOKEN), m => Number(m[1])))]
+}
+
+async function syncPending($: EngineInterface, text: string) {
+  const now = draftImages(text)
+  const before = (await $.state.get(PENDING)).value ?? []
+  if (before.length === now.length && before.every((n, i) => n === now[i])) return
+  await update($, pending, () => now)
+}
+
+// A pasted image's preview, read again only when its file changes.
+async function pastedImage($: EngineInterface, n: number): Promise<ImageRef | null> {
+  const folder = await pastedImagesDir($)
+  if (folder === null) return null
+  const entries = await $.fs.list(folder).catch(() => [])
+  const file = entries.find(f => f.kind === 'file' && Number(PASTED_NAME.exec(f.name)?.[1]) === n)
+  if (file === undefined) return null
+  const id = `${folder}/${file.name}:${file.mtimeMs}:${file.size}`
+  let job = pasted.get(id)
+  if (job === undefined) {
+    job = $.fs
+      .read(`${folder}/${file.name}`, { as: 'bytes' })
+      .then(({ base64 }) => prepare($, { data: base64 }))
+      .catch(() => null)
+    pasted.set(id, job)
+    if (pasted.size > 50) pasted.delete(pasted.keys().next().value!)
+  }
+  return job
+}
+
+// The draft with `[Image #N]` taken out, and the space it leaves doubled.
+function withoutImage(text: string, n: number): string {
+  return text
+    .replace(new RegExp(` ?\\[Image #${n}\\]`, 'g'), '')
+    .replace(new RegExp(`\\[Image #${n}\\] ?`, 'g'), '')
+}
+
+async function removeFromDraft($: EngineInterface, n: number) {
+  const box = await $.prompt.read()
+  const text = withoutImage(box.text, n)
+  await $.prompt.fill({ text, mode: 'replace' })
+  await syncPending($, text)
+}
+
+// The draft's images over the prompt, each with a ✕ in its top-right corner.
+async function draftStrip($: EngineInterface, el: E, numbers: number[], rowsEach: number, room: number) {
+  const { Box, Button, Text } = el
+  const items = await Promise.all(
+    numbers.map(async n => {
+      const ref = await pastedImage($, n)
+      const { columns, rows } = ref === null ? { columns: 16, rows: 1 } : fit(ref, Math.min(room, 32), rowsEach)
+      const width = Math.max(columns, 14)
+      return (
+        <Box key={`draft-${n}`} flexDirection="column" width={width}>
+          <Box flexDirection="row" justifyContent="space-between" width={width}>
+            <Text dimColor>Image #{n}</Text>
+            <Button key={`draft-remove-${n}`} plain label="✕" onPress={() => removeFromDraft($, n)} />
+          </Box>
+          {ref === null
+            ? <Text dimColor>(no preview yet)</Text>
+            : await picture($, el, ref, columns, rows, `draft-pic-${n}`)}
+        </Box>
+      )
+    }),
+  )
+  return (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2} paddingLeft={2}>
+      {items}
+    </Box>
+  )
+}
+
 async function attachedFor($: EngineInterface, id: string): Promise<ImageRef[]> {
   return (await $.state.get({ ...ATTACHED, id })).value ?? []
 }
@@ -294,6 +417,39 @@ export const register: Register = (on, options) => {
       argumentHint: '<path>',
     })
     return next(e)
+  })
+
+  // Track which pasted images the draft holds, for the preview band: typed
+  // edits come by prompt.edit, everything else (a paste of an image, a
+  // submit or clear, history, undo) by prompt.change.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    await syncPending($, box.text)
+    return box
+  }).catch(($, e, next) => next(e))
+
+  on('prompt.change', async ($, e, next) => {
+    await syncPending($, e.text)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // A /clear goes on under a new session id, with its own pasted images.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      pastedDir = undefined
+      await update($, pending, () => [])
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Pasted images waiting in the draft, above the prompt box.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
+    const numbers = await read($, pending)
+    if (numbers.length === 0) return next(e)
+    const el = $.ui.resolve(e)
+    const rowsEach = Math.max(2, Math.min(config.thumbRows, e.props.maxRows - 2))
+    return draftStrip($, el, numbers, rowsEach, e.props.bodyColumns - 2)
   })
 
   // Remember the images each row carries as it is stored: a prompt's under its

@@ -16,6 +16,8 @@ declare module 'claude-code' {
       attached: StateFamily<ImageRef[]>
       /** what the full-size viewer pane shows */
       viewer: Viewer
+      /** the `[Image #N]` numbers in the prompt draft, not yet submitted */
+      pending: number[]
     }
   }
 }
