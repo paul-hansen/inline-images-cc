@@ -9,11 +9,11 @@ const READ = {
 
 const run = (stdout: string) => ({
   value: {
-  exitCode: 0,
-  stdout,
-  stderr: '',
-  isStdoutTruncated: false,
-  isStderrTruncated: false,
+    exitCode: 0,
+    stdout,
+    stderr: '',
+    isStdoutTruncated: false,
+    isStderrTruncated: false,
   },
 })
 
@@ -65,4 +65,30 @@ test('a result with no image is left to the engine', async ($, on) => {
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
   expect(await ui.find({ type: 'Raster' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('without ImageMagick the result is the engine’s, with one notice', async ($, on) => {
+  mock.env(on, { TERM: 'xterm-256color', HOME: '/home/t' })
+  on('ui.render', async () => ({ type: 'Text', props: {}, children: ['Read image (150B)'] }))
+  const toasts: string[] = []
+  on('ui.toast', async ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', async () => ({
+    value: { exitCode: 3, stdout: '', stderr: 'ImageMagick is not installed', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  for (const id of ['toolu_3', 'toolu_4']) {
+    const ui = await $.ui.mount({
+      plugin: 'inline-images',
+      surface: 'terminal',
+      component: 'ToolResult',
+      requestId: id,
+      props: { tool_use_id: id, tool: 'Read', output: { ...READ, file: { ...READ.file, base64: PNG + id } }, isErrored: false },
+    })
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    await ui.unmount()
+  }
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toContain('ImageMagick')
 })

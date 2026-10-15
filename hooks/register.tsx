@@ -21,7 +21,7 @@ const PREPARE = `
 M=$(command -v magick || command -v convert) || { echo "ImageMagick is not installed" >&2; exit 3; }
 mkdir -p "$1"
 f="$1/$2.png"
-if [ -s "$f" ]; then cat >/dev/null; else
+if [ -s "$f" ]; then cat >/dev/null; touch "$f"; else
   base64 -d | "$M" '-[0]' -auto-orient -resize '2048x2048>' "png:$f.tmp" && mv "$f.tmp" "$f" || exit 4
 fi
 "$M" "$f" -format '%w %h' info:
@@ -32,6 +32,15 @@ const PIXELS = `
 M=$(command -v magick || command -v convert) || exit 3
 "$M" "$1" -background none -resize "$2x$3!" -depth 8 rgba:- | base64 | tr -d '\\n'
 `
+
+// Drops cached PNGs unused for $2 days, then all but the newest $3.
+const PRUNE = `
+cd "$1" 2>/dev/null || exit 0
+find . -maxdepth 1 -name '*.png*' -mtime +"$2" -exec rm -f {} +
+ls -1t | grep '\\.png$' | tail -n +"$3" | while IFS= read -r f; do rm -f -- "$f"; done
+`
+const KEEP_DAYS = 30
+const KEEP_FILES = 2000
 
 const DEFAULT = 0x01000000
 
@@ -70,6 +79,26 @@ function toBase64(bytes: Uint8Array): string {
 let config: Config = { renderer: 'auto', maxRows: 20, thumbRows: 8, cellAspect: 2 }
 const prepared = new Map<string, Promise<ImageRef | null>>()
 const rasters = new Map<string, Promise<string | null>>()
+const remote = new Map<string, Promise<string>>()
+let isMagickMissingShown = false
+
+// A cache of jobs that keeps its newest `size`, a failed job not kept.
+function cached<T>(jobs: Map<string, Promise<T>>, id: string, size: number, start: () => Promise<T>, isFailed: (v: T) => boolean) {
+  let job = jobs.get(id)
+  if (job === undefined) {
+    job = start()
+    jobs.set(id, job)
+    job.then(value => isFailed(value) && jobs.delete(id), () => jobs.delete(id))
+    if (jobs.size > size) jobs.delete(jobs.keys().next().value!)
+  }
+  return job
+}
+
+// A number option as given, or its default when it is not one in range.
+function num(value: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback
+}
 let mode: Promise<Mode> | undefined
 let cacheDir: Promise<string> | undefined
 
@@ -105,8 +134,15 @@ async function decode($: EngineInterface, raw: Raw, hash: string): Promise<Image
     timeoutMs: 20_000,
   })
   const [width = 0, height = 0] = ran.stdout.trim().split(' ').map(Number)
+  if (ran.exitCode === 3) {
+    if (!isMagickMissingShown) {
+      isMagickMissingShown = true
+      $.ui.toast('inline-images needs ImageMagick (magick or convert on PATH) to draw images', { timeoutMs: 10_000 })
+    }
+    return null
+  }
   if (ran.exitCode !== 0 || !(width > 0 && height > 0)) {
-    $.ui.log(`inline-images: ${ran.stderr.trim() || 'could not decode an image'}`)
+    $.ui.log(`inline-images: ${ran.stderr.trim() || 'could not decode an image'}`, { to: 'debug' })
     return null
   }
   return { hash, path: `${folder}/${hash}.png`, width, height }
@@ -116,13 +152,7 @@ async function prepare($: EngineInterface, raw: Raw): Promise<ImageRef | null> {
   const bytes = fromBase64(raw.data)
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
   const hash = Array.from(digest.slice(0, 16), b => b.toString(16).padStart(2, '0')).join('')
-  let job = prepared.get(hash)
-  if (job === undefined) {
-    job = decode($, raw, hash).catch(() => null)
-    prepared.set(hash, job)
-    job.then(ref => ref === null && prepared.delete(hash))
-  }
-  return job
+  return cached(prepared, hash, 500, () => decode($, raw, hash).catch(() => null), ref => ref === null)
 }
 
 async function prepareAll($: EngineInterface, raws: Raw[]): Promise<ImageRef[]> {
@@ -166,14 +196,7 @@ async function scale($: EngineInterface, ref: ImageRef, columns: number, rows: n
 
 function halfblocks($: EngineInterface, ref: ImageRef, columns: number, rows: number) {
   const id = `${ref.hash}:${columns}x${rows}`
-  let job = rasters.get(id)
-  if (job === undefined) {
-    job = scale($, ref, columns, rows).catch(() => null)
-    rasters.set(id, job)
-    job.then(cells => cells === null && rasters.delete(id))
-    if (rasters.size > 200) rasters.delete(rasters.keys().next().value!)
-  }
-  return job
+  return cached(rasters, id, 200, () => scale($, ref, columns, rows).catch(() => null), cells => cells === null)
 }
 
 // The box an image fills, in cells: no wider than `maxColumns` or (unless
@@ -196,8 +219,9 @@ async function picture(
   const alt = `[image ${ref.width}×${ref.height}]`
   if ((await detectMode($)) === 'image') {
     const isRemote = Boolean(await $.env.get('SSH_CONNECTION'))
+    // Over ssh the terminal cannot read this machine's files: send the bytes.
     const source = isRemote
-      ? { png: (await $.fs.read(ref.path, { as: 'bytes' })).base64 }
+      ? { png: await cached(remote, ref.hash, 20, async () => (await $.fs.read(ref.path, { as: 'bytes' })).base64, () => false) }
       : { file: ref.path, format: 'png' as const }
     return <Image key={key} source={source} columns={columns} rows={rows} alt={alt} />
   }
@@ -318,16 +342,8 @@ async function pastedImage($: EngineInterface, n: number): Promise<ImageRef | nu
   const file = entries.find(f => f.kind === 'file' && Number(PASTED_NAME.exec(f.name)?.[1]) === n)
   if (file === undefined) return null
   const id = `${folder}/${file.name}:${file.mtimeMs}:${file.size}`
-  let job = pasted.get(id)
-  if (job === undefined) {
-    job = $.fs
-      .read(`${folder}/${file.name}`, { as: 'bytes' })
-      .then(({ base64 }) => prepare($, { data: base64 }))
-      .catch(() => null)
-    pasted.set(id, job)
-    if (pasted.size > 50) pasted.delete(pasted.keys().next().value!)
-  }
-  return job
+  const read = () => $.fs.read(`${folder}/${file.name}`, { as: 'bytes' }).then(({ base64 }) => prepare($, { data: base64 }))
+  return cached(pasted, id, 50, () => read().catch(() => null), ref => ref === null)
 }
 
 // The draft with `[Image #N]` taken out, and the space it leaves doubled.
@@ -404,9 +420,9 @@ function imagesIn(value: unknown, out: Raw[] = [], depth = 0): Raw[] {
 export const register: Register = (on, options) => {
   config = {
     renderer: String(options.renderer ?? 'auto'),
-    maxRows: Number(options.maxRows ?? 20),
-    thumbRows: Number(options.thumbRows ?? 8),
-    cellAspect: Number(options.cellAspect ?? 2),
+    maxRows: Math.round(num(options.maxRows, 20, 2, 200)),
+    thumbRows: Math.round(num(options.thumbRows, 8, 2, 100)),
+    cellAspect: num(options.cellAspect, 2, 0.5, 4),
   }
   mode = undefined
 
@@ -416,6 +432,10 @@ export const register: Register = (on, options) => {
       description: 'Show an image file inline in the transcript',
       argumentHint: '<path>',
     })
+    // Keep the PNG cache from growing without end; off the start's path.
+    void dir($)
+      .then(folder => $.process.run(['sh', '-c', PRUNE, 'sh', folder, String(KEEP_DAYS), String(KEEP_FILES + 1)]))
+      .catch(() => {})
     return next(e)
   })
 
