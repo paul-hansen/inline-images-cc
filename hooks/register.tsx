@@ -2,17 +2,17 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { ImageRef } from '../types'
+import { draftImages, fit as fitCells, fromBase64, imagesIn, pack, withoutImage } from './pixels'
+import type { Raw } from './pixels'
 
 const PANE = 'image-viewer'
 const ATTACHED = { plugin: 'inline-images', key: 'attached' } as const
 const viewer = atom({ plugin: 'inline-images', key: 'viewer' } as const, null)
 const PENDING = { plugin: 'inline-images', key: 'pending' } as const
 const pending = atom(PENDING, [] as number[])
-const IMAGE_TOKEN = /\[Image #(\d+)\]/g
 
 type E = Elements['terminal']
 type Mode = 'image' | 'halfblock'
-type Raw = { data: string }
 type Config = { renderer: string; maxRows: number; thumbRows: number; cellAspect: number }
 
 // Decodes any image ImageMagick reads (png, jpeg, gif, webp) from base64 on
@@ -41,40 +41,6 @@ ls -1t | grep '\\.png$' | tail -n +"$3" | while IFS= read -r f; do rm -f -- "$f"
 `
 const KEEP_DAYS = 30
 const KEEP_FILES = 2000
-
-const DEFAULT = 0x01000000
-
-const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-const LOOKUP = new Uint8Array(256)
-for (let i = 0; i < 64; i++) LOOKUP[ALPHABET.charCodeAt(i)] = i
-
-function fromBase64(text: string): Uint8Array {
-  const clean = text.replace(/[^A-Za-z0-9+/]/g, '')
-  const out = new Uint8Array(Math.floor((clean.length * 3) / 4))
-  let o = 0
-  for (let i = 0; i < clean.length; i += 4) {
-    const n =
-      (LOOKUP[clean.charCodeAt(i)]! << 18) | (LOOKUP[clean.charCodeAt(i + 1)]! << 12) |
-      (LOOKUP[clean.charCodeAt(i + 2)]! << 6) | LOOKUP[clean.charCodeAt(i + 3)]!
-    out[o++] = n >> 16
-    if (o < out.length) out[o++] = (n >> 8) & 255
-    if (o < out.length) out[o++] = n & 255
-  }
-  return out
-}
-
-function toBase64(bytes: Uint8Array): string {
-  const parts: string[] = []
-  for (let i = 0; i < bytes.length; i += 3) {
-    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
-    parts.push(
-      ALPHABET[n >> 18]! + ALPHABET[(n >> 12) & 63]! +
-      (i + 1 < bytes.length ? ALPHABET[(n >> 6) & 63]! : '=') +
-      (i + 2 < bytes.length ? ALPHABET[n & 63]! : '='),
-    )
-  }
-  return parts.join('')
-}
 
 let config: Config = { renderer: 'auto', maxRows: 20, thumbRows: 8, cellAspect: 2 }
 const prepared = new Map<string, Promise<ImageRef | null>>()
@@ -160,31 +126,6 @@ async function prepareAll($: EngineInterface, raws: Raw[]): Promise<ImageRef[]> 
   return refs.filter(ref => ref !== null)
 }
 
-function pack(px: Uint8Array, columns: number, rows: number): string {
-  // One '▀' per cell: the foreground is the upper pixel, the background the
-  // lower; a transparent pixel is the terminal's own background.
-  const words = new Uint32Array(columns * rows * 3)
-  const color = (i: number) =>
-    px[i + 3]! < 96 ? DEFAULT : (px[i]! << 16) | (px[i + 1]! << 8) | px[i + 2]!
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < columns; x++) {
-      const cell = (y * columns + x) * 3
-      const top = color((2 * y * columns + x) * 4)
-      const bottom = color(((2 * y + 1) * columns + x) * 4)
-      if (top === DEFAULT) {
-        words[cell] = bottom === DEFAULT ? 0x20 : 0x2584
-        words[cell + 1] = bottom
-        words[cell + 2] = DEFAULT
-      } else {
-        words[cell] = 0x2580
-        words[cell + 1] = top
-        words[cell + 2] = bottom
-      }
-    }
-  }
-  return toBase64(new Uint8Array(words.buffer))
-}
-
 async function scale($: EngineInterface, ref: ImageRef, columns: number, rows: number) {
   const ran = await $.process.run(
     ['sh', '-c', PIXELS, 'sh', ref.path, String(columns), String(rows * 2)],
@@ -199,17 +140,8 @@ function halfblocks($: EngineInterface, ref: ImageRef, columns: number, rows: nu
   return cached(rasters, id, 200, () => scale($, ref, columns, rows).catch(() => null), cells => cells === null)
 }
 
-// The box an image fills, in cells: no wider than `maxColumns` or (unless
-// upscaled) its own pixels at about 8 a cell, no taller than `maxRows`.
 function fit(ref: ImageRef, maxColumns: number, maxRows: number, isUpscaled = false) {
-  const natural = isUpscaled ? Infinity : Math.ceil(ref.width / 8)
-  let columns = Math.max(1, Math.min(maxColumns, natural, 255))
-  let rows = Math.max(1, Math.round((columns * ref.height) / ref.width / config.cellAspect))
-  if (rows > maxRows) {
-    rows = maxRows
-    columns = Math.max(1, Math.min(columns, Math.round((rows * config.cellAspect * ref.width) / ref.height)))
-  }
-  return { columns, rows: Math.min(rows, 255) }
+  return fitCells(ref, maxColumns, maxRows, config.cellAspect, isUpscaled)
 }
 
 async function picture(
@@ -323,10 +255,6 @@ function pastedImagesDir($: EngineInterface): Promise<string | null> {
   return pastedDir
 }
 
-function draftImages(text: string): number[] {
-  return [...new Set(Array.from(text.matchAll(IMAGE_TOKEN), m => Number(m[1])))]
-}
-
 async function syncPending($: EngineInterface, text: string) {
   const now = draftImages(text)
   const before = (await $.state.get(PENDING)).value ?? []
@@ -344,13 +272,6 @@ async function pastedImage($: EngineInterface, n: number): Promise<ImageRef | nu
   const id = `${folder}/${file.name}:${file.mtimeMs}:${file.size}`
   const read = () => $.fs.read(`${folder}/${file.name}`, { as: 'bytes' }).then(({ base64 }) => prepare($, { data: base64 }))
   return cached(pasted, id, 50, () => read().catch(() => null), ref => ref === null)
-}
-
-// The draft with `[Image #N]` taken out, and the space it leaves doubled.
-function withoutImage(text: string, n: number): string {
-  return text
-    .replace(new RegExp(` ?\\[Image #${n}\\]`, 'g'), '')
-    .replace(new RegExp(`\\[Image #${n}\\] ?`, 'g'), '')
 }
 
 async function removeFromDraft($: EngineInterface, n: number) {
@@ -395,26 +316,6 @@ async function attachedFor($: EngineInterface, id: string): Promise<ImageRef[]> 
 async function toolImages($: EngineInterface, id: string | undefined, output: unknown) {
   const stored = id === undefined ? [] : await attachedFor($, id)
   return stored.length > 0 ? stored : prepareAll($, imagesIn(output))
-}
-
-// Every image in a tool's output or a content block, whatever its spelling:
-// an API image block, an MCP one, the Read tool's record, a PDF's pages.
-function imagesIn(value: unknown, out: Raw[] = [], depth = 0): Raw[] {
-  if (depth > 6 || value === null || typeof value !== 'object') return out
-  if (Array.isArray(value)) {
-    for (const item of value) imagesIn(item, out, depth + 1)
-    return out
-  }
-  const o = value as Record<string, unknown>
-  const source = o.source as Record<string, unknown> | undefined
-  const mime = String(o.media_type ?? o.mediaType ?? o.mimeType ?? o.type ?? source?.media_type ?? '')
-  const data = o.base64 ?? o.data ?? source?.data
-  if (typeof data === 'string' && data.length > 64 && (mime.startsWith('image/') || o.type === 'image')) {
-    out.push({ data })
-    return out
-  }
-  for (const key of Object.keys(o)) imagesIn(o[key], out, depth + 1)
-  return out
 }
 
 export const register: Register = (on, options) => {
