@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { ImageRef } from '../types'
-import { draftImages, fit as fitCells, fromBase64, imagesIn, pack, withoutImage } from './pixels'
+import { draftImages, fit as fitCells, fromBase64, imagesIn, isAnimated, pack, withoutImage } from './pixels'
 import type { Raw } from './pixels'
 
 const PANE = 'image-viewer'
@@ -10,6 +10,9 @@ const ATTACHED = { plugin: 'inline-images', key: 'attached' } as const
 const viewer = atom({ plugin: 'inline-images', key: 'viewer' } as const, null)
 const PENDING = { plugin: 'inline-images', key: 'pending' } as const
 const pending = atom(PENDING, [] as number[])
+const GALLERY = { plugin: 'inline-images', key: 'gallery' } as const
+const gallery = atom(GALLERY, [] as ImageRef[])
+const GALLERY_SIZE = 500
 
 type E = Elements['terminal']
 type Mode = 'image' | 'halfblock'
@@ -39,6 +42,13 @@ cd "$1" 2>/dev/null || exit 0
 find . -maxdepth 1 -name '*.png*' -mtime +"$2" -exec rm -f {} +
 ls -1t | grep '\\.png$' | tail -n +"$3" | while IFS= read -r f; do rm -f -- "$f"; done
 `
+// Opens a file in the desktop's own viewer, let go of at once.
+const OPEN = `
+if command -v xdg-open >/dev/null 2>&1; then ( xdg-open "$1" </dev/null >/dev/null 2>&1 & )
+elif command -v open >/dev/null 2>&1; then open "$1"
+else echo "found neither xdg-open nor open" >&2; exit 3; fi
+`
+
 const KEEP_DAYS = 30
 const KEEP_FILES = 2000
 
@@ -93,7 +103,7 @@ function dir($: EngineInterface): Promise<string> {
   return cacheDir
 }
 
-async function decode($: EngineInterface, raw: Raw, hash: string): Promise<ImageRef | null> {
+async function decode($: EngineInterface, raw: Raw, hash: string, isMoving: boolean): Promise<ImageRef | null> {
   const folder = await dir($)
   const ran = await $.process.run(['sh', '-c', PREPARE, 'sh', folder, hash], {
     stdin: raw.data,
@@ -111,14 +121,16 @@ async function decode($: EngineInterface, raw: Raw, hash: string): Promise<Image
     $.ui.log(`inline-images: ${ran.stderr.trim() || 'could not decode an image'}`, { to: 'debug' })
     return null
   }
-  return { hash, path: `${folder}/${hash}.png`, width, height }
+  const ref: ImageRef = { hash, path: `${folder}/${hash}.png`, width, height }
+  return isMoving ? { ...ref, isAnimated: true } : ref
 }
 
 async function prepare($: EngineInterface, raw: Raw): Promise<ImageRef | null> {
   const bytes = fromBase64(raw.data)
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
   const hash = Array.from(digest.slice(0, 16), b => b.toString(16).padStart(2, '0')).join('')
-  return cached(prepared, hash, 500, () => decode($, raw, hash).catch(() => null), ref => ref === null)
+  const job = () => decode($, raw, hash, isAnimated(bytes)).catch(() => null)
+  return cached(prepared, hash, 500, job, ref => ref === null)
 }
 
 async function prepareAll($: EngineInterface, raws: Raw[]): Promise<ImageRef[]> {
@@ -183,13 +195,14 @@ function viewButton($: EngineInterface, el: E, ref: ImageRef, title: string, key
 async function strip(
   $: EngineInterface, el: E, refs: ImageRef[], site: string, room: number, rowsEach: number, title: string,
 ) {
-  const { Box } = el
+  const { Box, Text } = el
   const items = await Promise.all(
     refs.map(async (ref, i) => {
       const { columns, rows } = fit(ref, room, rowsEach)
       return (
         <Box key={`${site}-${i}`} flexDirection="column" width={Math.max(columns, 17)}>
           {await picture($, el, ref, columns, rows, `${site}-pic-${i}`)}
+          {ref.isAnimated ? <Text dimColor>animated, first frame</Text> : null}
           {viewButton($, el, ref, title, `${site}-view-${i}`)}
         </Box>
       )
@@ -206,6 +219,35 @@ async function strip(
 // (86b73434-8a79-4128-8542-000000000000), so prompts are keyed by the rest.
 function promptKey(uuid: string): string {
   return `prompt:${uuid.slice(0, 23)}`
+}
+
+// Every image the session showed, oldest first, for the viewer to step through.
+async function remember($: EngineInterface, refs: ImageRef[]) {
+  await update($, gallery, was => {
+    const fresh = refs.filter(ref => !was.some(old => old.hash === ref.hash))
+    return fresh.length === 0 ? was : [...was, ...fresh].slice(-GALLERY_SIZE)
+  })
+}
+
+// The viewer moves `by` images through the gallery, wrapping at its ends.
+async function step($: EngineInterface, by: number) {
+  const all = (await $.state.get(GALLERY)).value ?? []
+  await update($, viewer, was => {
+    if (was === null || all.length === 0) return was
+    const at = all.findIndex(ref => ref.hash === was.image.hash)
+    const next = all[(((at < 0 ? 0 : at + by) % all.length) + all.length) % all.length]!
+    return { ...was, image: next }
+  })
+}
+
+async function openExternally($: EngineInterface, path: string) {
+  const ran = await $.process.run(['sh', '-c', OPEN, 'sh', path], { timeoutMs: 5_000 }).catch(() => null)
+  if (ran === null || ran.exitCode !== 0) $.ui.toast(`Could not open ${path}: ${ran?.stderr.trim() || 'the opener failed'}`)
+}
+
+async function copyPath($: EngineInterface, path: string, surface: Parameters<EngineInterface['ui']['copy']>[0]['surface']) {
+  const copied = await $.ui.copy({ text: path, surface })
+  $.ui.toast(copied.isCopied ? 'Copied the image’s path' : `Could not copy the path (${copied.reason})`)
 }
 
 let pastedDir: Promise<string | null> | undefined
@@ -309,6 +351,14 @@ async function draftStrip($: EngineInterface, el: E, numbers: number[], rowsEach
   )
 }
 
+async function fileImage($: EngineInterface, path: string): Promise<ImageRef | null> {
+  try {
+    return await prepare($, { data: (await $.fs.read(path, { as: 'bytes' })).base64 })
+  } catch {
+    return null
+  }
+}
+
 async function attachedFor($: EngineInterface, id: string): Promise<ImageRef[]> {
   return (await $.state.get({ ...ATTACHED, id })).value ?? []
 }
@@ -332,6 +382,10 @@ export const register: Register = (on, options) => {
       name: 'image',
       description: 'Show an image file inline in the transcript',
       argumentHint: '<path>',
+    })
+    await $.command.register({
+      name: 'images',
+      description: 'Show every image of this session as thumbnails',
     })
     // Keep the PNG cache from growing without end; off the start's path.
     void dir($)
@@ -389,14 +443,40 @@ export const register: Register = (on, options) => {
     }
     for (const [id, raws] of jobs) {
       const refs = await prepareAll($, raws)
-      if (refs.length > 0) await $.state.set({ ...ATTACHED, id }, refs)
+      if (refs.length > 0) {
+        await $.state.set({ ...ATTACHED, id }, refs)
+        await remember($, refs)
+      }
     }
     return stored
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'image' }, async ($, e) => {
     const path = e.args.trim()
-    return { text: path === '' ? 'Usage: /image <path>' : `Image: ${path}` }
+    if (path === '') return { text: 'Usage: /image <path>' }
+    const ref = await fileImage($, path)
+    if (ref !== null) await remember($, [ref])
+    return { text: ref === null ? `Could not read an image at ${path}` : `Image: ${path}` }
+  })
+
+  on('command.run', { command: 'images' }, async $ => {
+    const count = (await $.state.get(GALLERY)).value?.length ?? 0
+    return { text: count === 0 ? 'No images in this session yet.' : `${count} image${count === 1 ? '' : 's'} in this session` }
+  })
+
+  on('ui.render', { component: 'CommandOutput', props: { command: 'images' } }, async ($, e, next) => {
+    if (e.surface !== 'terminal') return next(e)
+    const engine = await next(e)
+    const refs = await read($, gallery)
+    if (refs.length === 0) return engine
+    const el = $.ui.resolve(e)
+    const { Box } = el
+    return (
+      <Box flexDirection="column">
+        {engine}
+        {await strip($, el, refs, e.requestId, 32, config.thumbRows, 'Image')}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'CommandOutput', props: { command: 'image' } }, async ($, e, next) => {
@@ -404,11 +484,7 @@ export const register: Register = (on, options) => {
     const engine = await next(e)
     const path = e.props.args.trim()
     if (path === '') return engine
-    let ref: ImageRef | null = null
-    try {
-      const { base64 } = await $.fs.read(path, { as: 'bytes' })
-      ref = await prepare($, { data: base64 })
-    } catch {}
+    const ref = await fileImage($, path)
     if (ref === null) return engine
     const el = $.ui.resolve(e)
     const { Box } = el
@@ -483,21 +559,37 @@ export const register: Register = (on, options) => {
   })
 
   // The lightbox: the picture as large as the pane allows.
+  // The lightbox: the picture as large as the pane allows, and the keys to
+  // step through the session's images, open one elsewhere or copy its path.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const el = $.ui.resolve(e)
-    const { Box, Text } = el
+    const { Box, Button, Text } = el
     const shown = await read($, viewer)
     if (shown === null) return <Text dimColor>No image selected.</Text>
     if (e.surface !== 'terminal') return <Text>{shown.image.path}</Text>
+    const all = await read($, gallery)
+    const at = all.findIndex(ref => ref.hash === shown.image.hash)
+    const image = shown.image
     const room = Math.max(10, e.props.bodyColumns)
-    const height = Math.max(4, e.props.scroll.bodyRows - 2)
-    const { columns, rows } = fit(shown.image, room, height, true)
+    const height = Math.max(4, e.props.scroll.bodyRows - 3)
+    const { columns, rows } = fit(image, room, height, true)
+    const facts = [
+      at < 0 ? null : `${at + 1} of ${all.length}`,
+      `${image.width}×${image.height}`,
+      image.isAnimated ? 'animated, first frame' : null,
+      image.path,
+    ].filter(fact => fact !== null)
     return (
       <Box flexDirection="column">
-        {await picture($, el as E, shown.image, columns, rows, 'full')}
-        <Text dimColor>
-          {shown.image.width}×{shown.image.height} · {shown.image.path} · Esc to close
-        </Text>
+        {await picture($, el as E, image, columns, rows, 'full')}
+        <Text dimColor>{facts.join(' · ')}</Text>
+        <Box flexDirection="row" columnGap={2}>
+          {all.length > 1 ? <Button key="prev" plain hotkey="p" label="previous" onPress={() => step($, -1)} /> : null}
+          {all.length > 1 ? <Button key="next" plain hotkey="n" label="next" onPress={() => step($, 1)} /> : null}
+          <Button key="open" plain hotkey="o" label="open" onPress={() => openExternally($, image.path)} />
+          <Button key="copy" plain hotkey="c" label="copy path" onPress={press => copyPath($, image.path, press.surface)} />
+          <Text dimColor>Esc to close</Text>
+        </Box>
       </Box>
     )
   })

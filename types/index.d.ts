@@ -5,6 +5,8 @@ export type ImageRef = {
   path: string
   width: number
   height: number
+  /** a GIF or WebP with more than one frame: only the first is drawn */
+  isAnimated?: boolean
 }
 
 export type Viewer = { image: ImageRef; title: string } | null
@@ -18,6 +20,8 @@ declare module 'claude-code' {
       viewer: Viewer
       /** the `[Image #N]` numbers in the prompt draft, not yet submitted */
       pending: number[]
+      /** every image the session showed, oldest first: the viewer steps through it */
+      gallery: ImageRef[]
     }
   }
 }
