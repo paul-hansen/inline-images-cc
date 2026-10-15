@@ -1,5 +1,6 @@
 {
   "name": "inline-images",
   "owner": { "name": "paul", "email": "mail@paul.rs" },
+  "description": "Images inline in the Claude Code terminal transcript",
   "plugins": [{ "name": "inline-images", "source": "./" }]
 }

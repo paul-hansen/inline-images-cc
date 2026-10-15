@@ -2,6 +2,7 @@
   "name": "inline-images",
   "version": "0.1.0",
   "description": "Shows images inline in the transcript: attached and pasted images by your prompt, image tool results (Read, screenshots) under their call, /images for the session's gallery, and a full-size viewer pane",
+  "author": { "name": "Paul Hansen", "email": "mail@paul.rs" },
   "types": "./types/index.d.ts",
   "userConfig": {
     "renderer": {
@@ -9,11 +10,7 @@
       "title": "Renderer",
       "description": "auto: kitty graphics on kitty/Ghostty, truecolor half-blocks elsewhere (WezTerm, tmux, ...). image: always the kitty-protocol Image. halfblock: always half-blocks.",
       "default": "auto",
-      "options": [
-        "auto",
-        "image",
-        "halfblock"
-      ]
+      "options": ["auto", "image", "halfblock"]
     },
     "maxRows": {
       "type": "number",
