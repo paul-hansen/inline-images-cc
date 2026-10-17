@@ -18,17 +18,18 @@ A Claude Code mod that shows images inline in the terminal transcript:
 At the prompt of a terminal session:
 
 ```
-/plugin install inline-images --marketplace <owner>/<repo>
+/plugin install inline-images --marketplace paul-hansen/inline-images-cc
 ```
 
 Answer `y` to add the marketplace, then pick a scope. From a shell:
-`claude plugin install inline-images --marketplace <owner>/<repo>`.
+`claude plugin install inline-images --marketplace paul-hansen/inline-images-cc`.
 
 ## Requirements
 
 - **ImageMagick**, `magick` (v7) or `convert` (v6) on `PATH`: it decodes
   PNG, JPEG, GIF and WebP and scales them. Without it the mod shows a notice
-  once and leaves the transcript as it was.
+  once, with the install command for the package manager it finds, and
+  leaves the transcript as it was.
 - `sh`, `base64`, `find`; `xdg-open` (Linux) or `open` (macOS) for the
   viewer's open key.
 

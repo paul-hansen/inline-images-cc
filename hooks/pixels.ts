@@ -121,6 +121,42 @@ export function draftImages(text: string): number[] {
   return [...new Set(Array.from(text.matchAll(IMAGE_TOKEN), m => Number(m[1])))]
 }
 
+// How each package manager installs ImageMagick, per OS family, most usual first.
+const INSTALL: Record<string, [string, string][]> = {
+  Darwin: [
+    ['brew', 'brew install imagemagick'],
+    ['port', 'sudo port install ImageMagick7'],
+    ['nix-env', 'nix-env -iA nixpkgs.imagemagick'],
+  ],
+  Linux: [
+    ['apt-get', 'sudo apt install imagemagick'],
+    ['dnf', 'sudo dnf install ImageMagick'],
+    ['yum', 'sudo yum install ImageMagick'],
+    ['pacman', 'sudo pacman -S imagemagick'],
+    ['zypper', 'sudo zypper install ImageMagick'],
+    // Alpine splits the JPEG and WebP coders out of the base package.
+    ['apk', 'apk add imagemagick imagemagick-jpeg imagemagick-webp'],
+    ['xbps-install', 'sudo xbps-install -S ImageMagick'],
+    ['emerge', 'sudo emerge media-gfx/imagemagick'],
+    ['pkg', 'pkg install imagemagick'],
+    ['nix-env', 'nix-env -iA nixpkgs.imagemagick'],
+    ['brew', 'brew install imagemagick'],
+  ],
+  FreeBSD: [['pkg', 'sudo pkg install ImageMagick7']],
+  Windows: [
+    ['winget', 'winget install ImageMagick.Q16-HDRI'],
+    ['scoop', 'scoop install main/imagemagick'],
+    ['choco', 'choco install imagemagick'],
+  ],
+}
+
+// The command that installs ImageMagick with a package manager present, from
+// `uname -s` and the managers found on PATH; null when none fits.
+export function installCommand(os: string, managers: string[]): string | null {
+  const family = /^(MINGW|MSYS|CYGWIN)/.test(os) ? 'Windows' : os
+  return (INSTALL[family] ?? []).find(([manager]) => managers.includes(manager))?.[1] ?? null
+}
+
 // The draft with `[Image #N]` taken out, and the space it leaves doubled.
 export function withoutImage(text: string, n: number): string {
   return text

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { draftImages, fit, fromBase64, imagesIn, isAnimated, pack, toBase64, withoutImage } from '../hooks/pixels'
+import { draftImages, fit, fromBase64, imagesIn, installCommand, isAnimated, pack, toBase64, withoutImage } from '../hooks/pixels'
 
 const DATA = 'A'.repeat(100)
 
@@ -129,5 +129,26 @@ describe('isAnimated', () => {
 
   test('a PNG', async () => {
     expect(isAnimated(bytes([0x89], 'PNG'))).toBe(false)
+  })
+})
+
+describe('installCommand', () => {
+  test('the OS’s usual manager wins over one also present', async () => {
+    expect(installCommand('Linux', ['brew', 'pacman'])).toBe('sudo pacman -S imagemagick')
+    expect(installCommand('Darwin', ['nix-env', 'brew'])).toBe('brew install imagemagick')
+  })
+
+  test('pkg means FreeBSD’s package on FreeBSD and Termux’s on Linux', async () => {
+    expect(installCommand('FreeBSD', ['pkg'])).toBe('sudo pkg install ImageMagick7')
+    expect(installCommand('Linux', ['pkg'])).toBe('pkg install imagemagick')
+  })
+
+  test('Git Bash and MSYS count as Windows', async () => {
+    expect(installCommand('MINGW64_NT-10.0-22631', ['scoop', 'winget'])).toBe('winget install ImageMagick.Q16-HDRI')
+  })
+
+  test('nothing when no manager fits', async () => {
+    expect(installCommand('Linux', [])).toBeNull()
+    expect(installCommand('SunOS', ['pkg'])).toBeNull()
   })
 })

@@ -77,7 +77,7 @@ test('without ImageMagick the result is the engine’s, with one notice', async 
     return { value: undefined }
   })
   on('process.run', async () => ({
-    value: { exitCode: 3, stdout: '', stderr: 'ImageMagick is not installed', isStdoutTruncated: false, isStderrTruncated: false },
+    value: { exitCode: 3, stdout: 'Linux\napt-get\n', stderr: 'ImageMagick is not installed', isStdoutTruncated: false, isStderrTruncated: false },
   }))
   for (const id of ['toolu_3', 'toolu_4']) {
     const ui = await $.ui.mount({
@@ -92,6 +92,7 @@ test('without ImageMagick the result is the engine’s, with one notice', async 
   }
   expect(toasts).toHaveLength(1)
   expect(toasts[0]).toContain('ImageMagick')
+  expect(toasts[0]).toContain('sudo apt install imagemagick')
 })
 
 // ImageMagick stood in for: PREPARE prints the size, PIXELS the RGBA asked.

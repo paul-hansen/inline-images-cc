@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { ImageRef } from '../types'
-import { draftImages, fit as fitCells, fromBase64, imagesIn, isAnimated, pack, withoutImage } from './pixels'
+import { draftImages, fit as fitCells, fromBase64, imagesIn, installCommand, isAnimated, pack, withoutImage } from './pixels'
 import type { Raw } from './pixels'
 
 const PANE = 'image-viewer'
@@ -19,9 +19,17 @@ type Mode = 'image' | 'halfblock'
 type Config = { renderer: string; maxRows: number; thumbRows: number; cellAspect: number }
 
 // Decodes any image ImageMagick reads (png, jpeg, gif, webp) from base64 on
-// stdin to a PNG cached under its hash, then prints its size.
+// stdin to a PNG cached under its hash, then prints its size. Without
+// ImageMagick it prints the OS and the package managers on PATH instead.
 const PREPARE = `
-M=$(command -v magick || command -v convert) || { echo "ImageMagick is not installed" >&2; exit 3; }
+M=$(command -v magick || command -v convert) || {
+  echo "ImageMagick is not installed" >&2
+  uname -s
+  for p in brew port apt-get dnf yum pacman zypper apk xbps-install emerge pkg nix-env winget scoop choco; do
+    command -v "$p" >/dev/null 2>&1 && echo "$p"
+  done
+  exit 3
+}
 mkdir -p "$1"
 f="$1/$2.png"
 if [ -s "$f" ]; then cat >/dev/null; touch "$f"; else
@@ -109,14 +117,17 @@ async function decode($: EngineInterface, raw: Raw, hash: string, isMoving: bool
     stdin: raw.data,
     timeoutMs: 20_000,
   })
-  const [width = 0, height = 0] = ran.stdout.trim().split(' ').map(Number)
   if (ran.exitCode === 3) {
     if (!isMagickMissingShown) {
       isMagickMissingShown = true
-      $.ui.toast('inline-images needs ImageMagick (magick or convert on PATH) to draw images', { timeoutMs: 10_000 })
+      const [os = '', ...managers] = ran.stdout.trim().split('\n')
+      const command = installCommand(os, managers)
+      const how = command === null ? 'see https://imagemagick.org/download/' : `install it with: ${command}`
+      $.ui.toast(`inline-images needs ImageMagick to draw images; ${how}`, { timeoutMs: 15_000 })
     }
     return null
   }
+  const [width = 0, height = 0] = ran.stdout.trim().split(' ').map(Number)
   if (ran.exitCode !== 0 || !(width > 0 && height > 0)) {
     $.ui.log(`inline-images: ${ran.stderr.trim() || 'could not decode an image'}`, { to: 'debug' })
     return null
