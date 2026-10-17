@@ -493,7 +493,9 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'CommandOutput', props: { command: 'image' } }, async ($, e, next) => {
     if (e.surface !== 'terminal') return next(e)
     const engine = await next(e)
-    const path = e.props.args.trim()
+    // The engine stores a plugin command's row without its arguments, so the
+    // path comes back from the text command.run answered.
+    const path = e.props.args.trim() || (/Image: (.+)$/.exec(e.props.text.trim())?.[1] ?? '')
     if (path === '') return engine
     const ref = await fileImage($, path)
     if (ref === null) return engine

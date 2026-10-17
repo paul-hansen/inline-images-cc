@@ -106,6 +106,38 @@ function magick(on: On) {
   })
 }
 
+test('/image draws the file under its output', async ($, on) => {
+  mock.env(on, { TERM: 'xterm-256color', HOME: '/home/t' })
+  on('ui.render', async () => ({ type: 'Text', props: {}, children: ['Image: /home/t/cat.png'] }))
+  on('fs.read', async () => ({ value: { base64: PNG } }))
+  magick(on)
+  const ui = await $.ui.mount({
+    plugin: 'inline-images',
+    surface: 'terminal',
+    component: 'CommandOutput',
+    requestId: 'cmd-image',
+    props: { command: 'image', args: '/home/t/cat.png', text: 'Image: /home/t/cat.png', isErrored: false } as never,
+  })
+  expect((await ui.find({ key: 'cmd-image-pic-0' }))?.type).toBe('Raster')
+  await ui.unmount()
+})
+
+test('/image draws the file when the row comes without its arguments', async ($, on) => {
+  mock.env(on, { TERM: 'xterm-256color', HOME: '/home/t' })
+  on('ui.render', async () => ({ type: 'Text', props: {}, children: ['Image: /home/t/cat.png'] }))
+  on('fs.read', async () => ({ value: { base64: PNG } }))
+  magick(on)
+  const ui = await $.ui.mount({
+    plugin: 'inline-images',
+    surface: 'terminal',
+    component: 'CommandOutput',
+    requestId: 'cmd-noargs',
+    props: { command: 'image', args: '', text: 'Image: /home/t/cat.png', isErrored: false } as never,
+  })
+  expect((await ui.find({ key: 'cmd-noargs-pic-0' }))?.type).toBe('Raster')
+  await ui.unmount()
+})
+
 test('a prompt’s attached image is drawn under it', async ($, on) => {
   mock.env(on, { TERM: 'xterm-256color', HOME: '/home/t' })
   on('ui.render', async () => ({ type: 'Text', props: {}, children: ['look at this'] }))
